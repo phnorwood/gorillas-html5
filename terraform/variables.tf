@@ -21,3 +21,15 @@ variable "ssh_cidr" {
   type        = string
   default     = "0.0.0.0/0"
 }
+
+variable "domain_name" {
+  description = "Domain name for the website (must have DNS A record pointing to the instance)"
+  type        = string
+  default     = "gorillas.phnorwood.com"
+}
+
+variable "letsencrypt_email" {
+  description = "Email address for Let's Encrypt certificate registration"
+  type        = string
+  default     = "norwood.patrick@gmail.com"
+}

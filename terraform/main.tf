@@ -116,9 +116,11 @@ resource "aws_instance" "web" {
 # Generate Ansible inventory from Terraform output
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/inventory.tftpl", {
-    public_ip   = aws_instance.web.public_ip
-    private_key = abspath("${path.module}/gorillas-key.pem")
-    ssh_user    = "ec2-user"
+    public_ip        = aws_instance.web.public_ip
+    private_key      = abspath("${path.module}/gorillas-key.pem")
+    ssh_user         = "ec2-user"
+    domain_name      = var.domain_name
+    letsencrypt_email = var.letsencrypt_email
   })
   filename = "${path.module}/../ansible/inventory.ini"
 }

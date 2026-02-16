@@ -1,5 +1,5 @@
 ---
-- name: Configure Gorillas HTML5 web server
+- name: Configure Gorillas HTML5 web server with Let's Encrypt SSL
   hosts: web
   become: true
 
@@ -8,31 +8,14 @@
     web_root: "/usr/share/nginx/html/gorillas-html5"
 
   tasks:
-    - name: Install Nginx, Git, and OpenSSL
+    - name: Install Nginx, Git, and Certbot
       ansible.builtin.dnf:
         name:
           - nginx
           - git
-          - openssl
+          - certbot
+          - python3-certbot-nginx
         state: present
-
-    - name: Create SSL certificate directory
-      ansible.builtin.file:
-        path: /etc/nginx/ssl
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Generate self-signed SSL certificate
-      ansible.builtin.command:
-        cmd: >
-          openssl req -x509 -nodes -days 365
-          -newkey rsa:2048
-          -keyout /etc/nginx/ssl/selfsigned.key
-          -out /etc/nginx/ssl/selfsigned.crt
-          -subj "/C=US/ST=State/L=City/O=Gorillas/CN={{ ansible_host }}"
-        creates: /etc/nginx/ssl/selfsigned.crt
 
     - name: Clone the gorillas-html5 repository
       ansible.builtin.git:
@@ -41,25 +24,13 @@
         version: main
         force: true
 
-    - name: Deploy Nginx site configuration
+    - name: Deploy initial Nginx HTTP-only configuration
       ansible.builtin.copy:
         dest: /etc/nginx/conf.d/gorillas.conf
         content: |
           server {
               listen 80 default_server;
-              server_name _;
-              return 301 https://$host$request_uri;
-          }
-
-          server {
-              listen 443 ssl default_server;
-              server_name _;
-
-              ssl_certificate     /etc/nginx/ssl/selfsigned.crt;
-              ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
-              ssl_protocols       TLSv1.2 TLSv1.3;
-              ssl_ciphers         HIGH:!aNULL:!MD5;
-
+              server_name {{ domain_name }};
               root {{ web_root }};
               index gorillas.html index.html;
 
@@ -120,6 +91,31 @@
         name: nginx
         enabled: true
         state: started
+
+    - name: Flush handlers to ensure Nginx is running with current config
+      ansible.builtin.meta: flush_handlers
+
+    - name: Obtain Let's Encrypt certificate via Certbot
+      ansible.builtin.command:
+        cmd: >
+          certbot --nginx
+          --non-interactive
+          --agree-tos
+          --email {{ letsencrypt_email }}
+          -d {{ domain_name }}
+          --redirect
+        creates: /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+
+    - name: Enable certbot renewal timer
+      ansible.builtin.systemd:
+        name: certbot-renew.timer
+        enabled: true
+        state: started
+
+    - name: Restart Nginx to apply final SSL configuration
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
 
   handlers:
     - name: Restart Nginx

@@ -10,7 +10,7 @@ output "public_ip" {
 
 output "website_url" {
   description = "URL to access the website (HTTPS)"
-  value       = "https://${aws_instance.web.public_ip}"
+  value       = "https://${var.domain_name}"
 }
 
 output "ssh_command" {
