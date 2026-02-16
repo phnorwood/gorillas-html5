@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Gorillas - HTML5</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <script>
+    // ========================================================================
+    // 1. CONFIGURATION & CONSTANTS
+    // ========================================================================
+    const CONFIG = {
+      width: 960,
+      height: 600,
+      gravity: 9.8,
+      pointsToWin: 3,
+      buildingMinWidth: 40,
+      buildingMaxWidth: 90,
+      buildingMinHeight: 80,
+      buildingMaxHeight: 340,
+      bananaRadius: 5,
+      explosionRadius: 35,
+      gorillaWidth: 28,
+      gorillaHeight: 30,
+      bananaSpeed: 1.8, // scale factor for velocity input
+      windMin: -5,
+      windMax: 5,
+    };
+
+    const COLORS = {
+      sky: '#0000AA',
+      sun: '#FFFF00',
+      sunFace: '#000000',
+      building: ['#AA0000', '#00AA00', '#0000AA', '#AAAAAA', '#AA00AA', '#00AAAA', '#AA5500'],
+      window: '#FFFF55',
+      windowOff: '#555555',
+      gorilla: '#AA5500',
+      gorillaFace: '#FFAA00',
+      banana: '#FFFF00',
+      explosion: ['#FF0000', '#FF4400', '#FF8800', '#FFAA00', '#FFFF00', '#FFFFFF'],
+      text: '#FFFFFF',
+      inputBg: '#000055',
+      inputBorder: '#5555FF',
+      ground: '#555555',
+    };
+
+    const GAME_STATES = {
+      TITLE: 'title',
+      SETTINGS: 'settings',
+      ROUND_START: 'roundStart',
+      INPUT: 'input',
+      THROWING: 'throwing',
+      FLYING: 'flying',
+      EXPLODING: 'exploding',
+      HIT: 'hit',
+      ROUND_OVER: 'roundOver',
+      GAME_OVER: 'gameOver',
+    };
+
+    // ========================================================================
+    // 2. GAME STATE
+    // ========================================================================
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    canvas.width = CONFIG.width;
+    canvas.height = CONFIG.height;
+
+    // Offscreen canvas for destructible terrain
+    let terrainCanvas, terrainCtx;
+
+    let state = {
+      phase: GAME_STATES.TITLE,
+      currentPlayer: 0, // 0 or 1
+      scores: [0, 0],
+      players: [
+        { name: 'Player 1', x: 0, y: 0, angle: 60, velocity: 50, armState: 0 },
+        { name: 'Player 2', x: 0, y: 0, angle: 120, velocity: 50, armState: 0 },
+      ],
+      buildings: [],
+      banana: null,
+      explosion: null,
+      wind: 0,
+      sun: { x: CONFIG.width / 2, y: 50, surprised: false, surprisedTimer: 0 },
+      roundMessage: '',
+      roundMessageTimer: 0,
+      inputField: 'angle', // 'angle' or 'velocity'
+      inputText: '',
+      cursorBlink: 0,
+      gravity: CONFIG.gravity,
+      pointsToWin: CONFIG.pointsToWin,
+      settingsField: 0, // 0=gravity, 1=points, 2=start
+      settingsValues: ['9.8', '3'],
+      titleBlink: 0,
+    };
+
+    // ========================================================================
+    // 3. UTILITY FUNCTIONS
+    // ========================================================================
+    function rand(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function randInt(min, max) {
+      return Math.floor(rand(min, max + 1));
+    }
+
+    function degToRad(deg) {
+      return (deg * Math.PI) / 180;
+    }
+
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+
+    function distance(x1, y1, x2, y2) {
+      return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+    }
+
+    // ========================================================================
+    // 4. CITY / BUILDING GENERATION
+    // ========================================================================
+    function generateCity() {
+      const buildings = [];
+      let x = 0;
+      while (x < CONFIG.width) {
+        const w = randInt(CONFIG.buildingMinWidth, CONFIG.buildingMaxWidth);
+        const h = randInt(CONFIG.buildingMinHeight, CONFIG.buildingMaxHeight);
+        const color = COLORS.building[randInt(0, COLORS.building.length - 1)];
+        buildings.push({ x, y: CONFIG.height - h, width: w, height: h, color });
+        x += w;
+      }
+      return buildings;
+    }
+
+    function placeGorillas(buildings) {
+      // Player 1: on a building in the left quarter
+      const leftRange = Math.floor(buildings.length * 0.25);
+      const leftIdx = randInt(1, Math.max(1, leftRange));
+      const b1 = buildings[leftIdx];
+      state.players[0].x = b1.x + b1.width / 2;
+      state.players[0].y = b1.y;
+
+      // Player 2: on a building in the right quarter
+      const rightRange = Math.floor(buildings.length * 0.75);
+      const rightIdx = randInt(Math.min(rightRange, buildings.length - 2), buildings.length - 2);
+      const b2 = buildings[rightIdx];
+      state.players[1].x = b2.x + b2.width / 2;
+      state.players[1].y = b2.y;
+    }
+
+    function renderTerrainToCanvas() {
+      terrainCanvas = document.createElement('canvas');
+      terrainCanvas.width = CONFIG.width;
+      terrainCanvas.height = CONFIG.height;
+      terrainCtx = terrainCanvas.getContext('2d');
+
+      // Draw buildings
+      for (const b of state.buildings) {
+        terrainCtx.fillStyle = b.color;
+        terrainCtx.fillRect(b.x, b.y, b.width, b.height);
+
+        // Windows
+        const windowW = 4;
+        const windowH = 6;
+        const windowSpacingX = 10;
+        const windowSpacingY = 14;
+        const marginX = 6;
+        const marginY = 8;
+
+        for (let wy = b.y + marginY; wy < CONFIG.height - windowSpacingY; wy += windowSpacingY) {
+          for (let wx = b.x + marginX; wx < b.x + b.width - marginX; wx += windowSpacingX) {
+            terrainCtx.fillStyle = Math.random() > 0.35 ? COLORS.window : COLORS.windowOff;
+            terrainCtx.fillRect(wx, wy, windowW, windowH);
+          }
+        }
+      }
+    }
+
+    // ========================================================================
+    // 5. PHYSICS & COLLISION
+    // ========================================================================
+    function launchBanana() {
+      const p = state.players[state.currentPlayer];
+      let angleDeg = p.angle;
+      // Convert angle: 0-180 from horizontal for each player
+      // Player 0 (left): angle measured from right horizontal, going CCW
+      // Player 1 (right): angle measured from left horizontal, going CCW
+      let angleRad;
+      if (state.currentPlayer === 0) {
+        angleRad = degToRad(angleDeg);
+      } else {
+        angleRad = degToRad(180 - angleDeg);
+      }
+
+      const speed = p.velocity * CONFIG.bananaSpeed;
+      const vx = Math.cos(angleRad) * speed;
+      const vy = -Math.sin(angleRad) * speed; // negative because canvas Y is inverted
+
+      state.banana = {
+        x: p.x,
+        y: p.y - CONFIG.gorillaHeight / 2 - CONFIG.bananaRadius - 2,
+        vx,
+        vy,
+        rotation: 0,
+        trail: [],
+      };
+    }
+
+    function updateBanana(dt) {
+      const b = state.banana;
+      if (!b) return;
+
+      // Apply gravity and wind
+      b.vy += state.gravity * dt * 3; // scale gravity for feel
+      b.vx += state.wind * dt * 0.5;
+
+      b.x += b.vx * dt * 60;
+      b.y += b.vy * dt * 60;
+      b.rotation += (Math.abs(b.vx) + Math.abs(b.vy)) * dt * 2;
+
+      // Trail for visual effect
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > 8) b.trail.shift();
+
+      // Check out of bounds
+      if (b.y > CONFIG.height + 20 || b.x < -50 || b.x > CONFIG.width + 50) {
+        state.banana = null;
+        state.phase = GAME_STATES.INPUT;
+        state.currentPlayer = 1 - state.currentPlayer;
+        state.inputField = 'angle';
+        state.inputText = '';
+        return;
+      }
+
+      // Off top is fine, banana comes back down
+      if (b.y < -500) {
+        // Let it fly but don't end turn
+      }
+
+      // Check sun hit
+      if (distance(b.x, b.y, state.sun.x, state.sun.y) < 30) {
+        state.sun.surprised = true;
+        state.sun.surprisedTimer = 2;
+      }
+
+      // Check hit on gorillas
+      for (let i = 0; i < 2; i++) {
+        if (i === state.currentPlayer) continue; // can't hit yourself
+        const p = state.players[i];
+        const gx = p.x;
+        const gy = p.y - CONFIG.gorillaHeight / 2;
+        if (
+          b.x > gx - CONFIG.gorillaWidth / 2 &&
+          b.x < gx + CONFIG.gorillaWidth / 2 &&
+          b.y > gy - CONFIG.gorillaHeight / 2 &&
+          b.y < gy + CONFIG.gorillaHeight / 2
+        ) {
+          // HIT!
+          startExplosion(b.x, b.y, CONFIG.explosionRadius * 1.5);
+          state.banana = null;
+          state.scores[state.currentPlayer]++;
+          state.phase = GAME_STATES.HIT;
+          return;
+        }
+      }
+
+      // Check terrain collision using pixel detection on terrain canvas
+      if (b.y > 0 && b.y < CONFIG.height && b.x > 0 && b.x < CONFIG.width) {
+        const pixel = terrainCtx.getImageData(Math.floor(b.x), Math.floor(b.y), 1, 1).data;
+        if (pixel[3] > 0) {
+          // Hit terrain
+          startExplosion(b.x, b.y, CONFIG.explosionRadius);
+          state.banana = null;
+          state.phase = GAME_STATES.EXPLODING;
+          return;
+        }
+      }
+    }
+
+    function startExplosion(x, y, radius) {
+      state.explosion = {
+        x,
+        y,
+        radius,
+        currentRadius: 0,
+        maxRadius: radius,
+        phase: 'growing', // growing, shrinking, done
+        alpha: 1,
+      };
+    }
+
+    function updateExplosion(dt) {
+      const e = state.explosion;
+      if (!e) return;
+
+      if (e.phase === 'growing') {
+        e.currentRadius += e.maxRadius * dt * 6;
+        if (e.currentRadius >= e.maxRadius) {
+          e.currentRadius = e.maxRadius;
+          e.phase = 'shrinking';
+          // Destroy terrain
+          destroyTerrain(e.x, e.y, e.maxRadius);
+        }
+      } else if (e.phase === 'shrinking') {
+        e.alpha -= dt * 4;
+        if (e.alpha <= 0) {
+          e.phase = 'done';
+          state.explosion = null;
+
+          if (state.phase === GAME_STATES.EXPLODING) {
+            // Switch turns
+            state.currentPlayer = 1 - state.currentPlayer;
+            state.phase = GAME_STATES.INPUT;
+            state.inputField = 'angle';
+            state.inputText = '';
+          } else if (state.phase === GAME_STATES.HIT) {
+            state.roundMessageTimer = 2.5;
+            state.phase = GAME_STATES.ROUND_OVER;
+          }
+        }
+      }
+    }
+
+    function destroyTerrain(cx, cy, radius) {
+      // Clear a circle from the terrain canvas
+      terrainCtx.save();
+      terrainCtx.globalCompositeOperation = 'destination-out';
+      terrainCtx.beginPath();
+      terrainCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+      terrainCtx.fill();
+      terrainCtx.restore();
+    }
+
+    // ========================================================================
+    // 6. RENDERING FUNCTIONS
+    // ========================================================================
+    function drawSky() {
+      ctx.fillStyle = COLORS.sky;
+      ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+    }
+
+    function drawSun() {
+      const s = state.sun;
+      // Sun body
+      ctx.fillStyle = COLORS.sun;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 28, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Rays
+      for (let i = 0; i < 12; i++) {
+        const angle = (i / 12) * Math.PI * 2;
+        const x1 = s.x + Math.cos(angle) * 30;
+        const y1 = s.y + Math.sin(angle) * 30;
+        const x2 = s.x + Math.cos(angle) * 38;
+        const y2 = s.y + Math.sin(angle) * 38;
+        ctx.strokeStyle = COLORS.sun;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+
+      // Face
+      ctx.fillStyle = COLORS.sunFace;
+      if (s.surprised) {
+        // Surprised face
+        ctx.beginPath();
+        ctx.arc(s.x - 8, s.y - 4, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(s.x + 8, s.y - 4, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(s.x, s.y + 8, 6, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Normal face - eyes
+        ctx.fillRect(s.x - 10, s.y - 6, 5, 5);
+        ctx.fillRect(s.x + 5, s.y - 6, 5, 5);
+        // Smile
+        ctx.beginPath();
+        ctx.arc(s.x, s.y + 4, 10, 0.1, Math.PI - 0.1);
+        ctx.strokeStyle = COLORS.sunFace;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    function drawTerrain() {
+      ctx.drawImage(terrainCanvas, 0, 0);
+    }
+
+    function drawGorilla(playerIdx) {
+      const p = state.players[playerIdx];
+      const x = p.x;
+      const y = p.y;
+      const w = CONFIG.gorillaWidth;
+      const h = CONFIG.gorillaHeight;
+
+      ctx.fillStyle = COLORS.gorilla;
+
+      // Body
+      ctx.fillRect(x - w / 4, y - h + 8, w / 2, h - 10);
+
+      // Head
+      ctx.fillRect(x - w / 4, y - h, w / 2, 10);
+
+      // Face details
+      ctx.fillStyle = COLORS.gorillaFace;
+      // Eyes
+      ctx.fillRect(x - 5, y - h + 3, 3, 3);
+      ctx.fillRect(x + 2, y - h + 3, 3, 3);
+      // Nose/mouth
+      ctx.fillRect(x - 2, y - h + 7, 4, 2);
+
+      ctx.fillStyle = COLORS.gorilla;
+
+      // Arms
+      const throwing = state.phase === GAME_STATES.THROWING && state.currentPlayer === playerIdx;
+      if (throwing) {
+        // Arms up for throw
+        if (playerIdx === 0) {
+          ctx.fillRect(x - w / 2 - 2, y - h + 2, 6, 4);
+          ctx.fillRect(x + w / 4, y - h - 6, 6, 8);
+        } else {
+          ctx.fillRect(x - w / 2 - 4, y - h - 6, 6, 8);
+          ctx.fillRect(x + w / 4 - 2, y - h + 2, 6, 4);
+        }
+      } else {
+        // Arms down
+        ctx.fillRect(x - w / 2 - 2, y - h + 8, 6, 12);
+        ctx.fillRect(x + w / 4 - 2, y - h + 8, 6, 12);
+      }
+
+      // Legs
+      ctx.fillRect(x - w / 4, y - 4, 5, 4);
+      ctx.fillRect(x + w / 4 - 5, y - 4, 5, 4);
+    }
+
+    function drawBanana() {
+      const b = state.banana;
+      if (!b) return;
+
+      // Trail
+      ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+      for (let i = 0; i < b.trail.length; i++) {
+        const t = b.trail[i];
+        const size = (i / b.trail.length) * 3 + 1;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Banana
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.rotation);
+      ctx.fillStyle = COLORS.banana;
+
+      // Draw banana shape (curved rectangle)
+      ctx.beginPath();
+      ctx.arc(0, 0, CONFIG.bananaRadius, 0, Math.PI, false);
+      ctx.arc(0, -2, CONFIG.bananaRadius - 1, Math.PI, 0, true);
+      ctx.fill();
+
+      // Simple banana: just a filled circle with a slight crescent
+      ctx.beginPath();
+      ctx.arc(0, 0, CONFIG.bananaRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#AAAA00';
+      ctx.beginPath();
+      ctx.arc(1, 1, CONFIG.bananaRadius - 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawExplosion() {
+      const e = state.explosion;
+      if (!e) return;
+
+      const colors = COLORS.explosion;
+      for (let i = colors.length - 1; i >= 0; i--) {
+        const r = e.currentRadius * ((i + 1) / colors.length);
+        ctx.globalAlpha = e.alpha;
+        ctx.fillStyle = colors[i];
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawHUD() {
+      ctx.fillStyle = COLORS.text;
+      ctx.font = '14px Courier New';
+
+      // Player names and scores
+      ctx.textAlign = 'left';
+      ctx.fillText(`${state.players[0].name}: ${state.scores[0]}`, 10, 20);
+      ctx.textAlign = 'right';
+      ctx.fillText(`${state.players[1].name}: ${state.scores[1]}`, CONFIG.width - 10, 20);
+
+      // Wind indicator
+      ctx.textAlign = 'center';
+      const windStr = state.wind > 0 ? `Wind: >>> ${Math.abs(state.wind).toFixed(1)}` :
+                       state.wind < 0 ? `Wind: ${Math.abs(state.wind).toFixed(1)} <<<` :
+                       'Wind: None';
+      ctx.fillText(windStr, CONFIG.width / 2, 20);
+    }
+
+    function drawInputUI() {
+      if (state.phase !== GAME_STATES.INPUT) return;
+
+      const p = state.players[state.currentPlayer];
+      const isLeft = state.currentPlayer === 0;
+      const panelX = isLeft ? 20 : CONFIG.width - 220;
+      const panelY = CONFIG.height - 100;
+      const panelW = 200;
+      const panelH = 90;
+
+      // Panel background
+      ctx.fillStyle = 'rgba(0, 0, 80, 0.9)';
+      ctx.fillRect(panelX, panelY, panelW, panelH);
+      ctx.strokeStyle = COLORS.inputBorder;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+      ctx.fillStyle = COLORS.text;
+      ctx.font = '14px Courier New';
+      ctx.textAlign = 'left';
+
+      const labelX = panelX + 10;
+
+      // Player name
+      ctx.fillStyle = '#FFFF55';
+      ctx.fillText(`${p.name}'s turn`, labelX, panelY + 18);
+
+      // Angle
+      ctx.fillStyle = state.inputField === 'angle' ? '#FFFFFF' : '#AAAAAA';
+      const angleVal = state.inputField === 'angle' ? state.inputText : String(p.angle);
+      ctx.fillText(`Angle:    ${angleVal}`, labelX, panelY + 40);
+
+      // Velocity
+      ctx.fillStyle = state.inputField === 'velocity' ? '#FFFFFF' : '#AAAAAA';
+      const velVal = state.inputField === 'velocity' ? state.inputText : String(p.velocity);
+      ctx.fillText(`Velocity: ${velVal}`, labelX, panelY + 58);
+
+      // Cursor blink
+      state.cursorBlink += 0.05;
+      if (Math.sin(state.cursorBlink * 5) > 0) {
+        const cursorField = state.inputField === 'angle' ? 40 : 58;
+        const textWidth = state.inputText.length;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(labelX + 100 + textWidth * 8.4, panelY + cursorField - 12, 8, 14);
+      }
+
+      // Instructions
+      ctx.fillStyle = '#888888';
+      ctx.font = '11px Courier New';
+      ctx.fillText('Tab=switch  Enter=throw', labelX, panelY + 78);
+    }
+
+    function drawTitleScreen() {
+      drawSky();
+
+      // Title
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 48px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText('G O R I L L A S', CONFIG.width / 2, 140);
+
+      ctx.font = '18px Courier New';
+      ctx.fillStyle = '#AAAAAA';
+      ctx.fillText('HTML5 Remake of the QBasic Classic', CONFIG.width / 2, 180);
+
+      // Draw decorative gorillas
+      ctx.fillStyle = COLORS.gorilla;
+      // Left gorilla
+      drawDecorativeGorilla(CONFIG.width / 2 - 120, 280);
+      // Right gorilla
+      drawDecorativeGorilla(CONFIG.width / 2 + 120, 280);
+
+      // Banana between them
+      ctx.fillStyle = COLORS.banana;
+      ctx.beginPath();
+      ctx.arc(CONFIG.width / 2, 250, 12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#AAAA00';
+      ctx.beginPath();
+      ctx.arc(CONFIG.width / 2 + 2, 252, 8, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Blink text
+      state.titleBlink += 0.03;
+      if (Math.sin(state.titleBlink * 3) > -0.3) {
+        ctx.fillStyle = '#FFFF55';
+        ctx.font = '20px Courier New';
+        ctx.fillText('Press ENTER or SPACE to Start', CONFIG.width / 2, 400);
+      }
+
+      ctx.fillStyle = '#888888';
+      ctx.font = '14px Courier New';
+      ctx.fillText('Press S for Settings', CONFIG.width / 2, 440);
+
+      ctx.fillStyle = '#555555';
+      ctx.font = '12px Courier New';
+      ctx.fillText('A classic artillery game since 1991', CONFIG.width / 2, 520);
+    }
+
+    function drawDecorativeGorilla(x, y) {
+      ctx.fillStyle = COLORS.gorilla;
+      // Body
+      ctx.fillRect(x - 14, y - 20, 28, 28);
+      // Head
+      ctx.fillRect(x - 12, y - 32, 24, 14);
+      // Arms
+      ctx.fillRect(x - 22, y - 16, 8, 18);
+      ctx.fillRect(x + 14, y - 16, 8, 18);
+      // Face
+      ctx.fillStyle = COLORS.gorillaFace;
+      ctx.fillRect(x - 7, y - 28, 4, 4);
+      ctx.fillRect(x + 3, y - 28, 4, 4);
+      ctx.fillRect(x - 4, y - 22, 8, 4);
+      // Legs
+      ctx.fillStyle = COLORS.gorilla;
+      ctx.fillRect(x - 10, y + 6, 8, 6);
+      ctx.fillRect(x + 2, y + 6, 8, 6);
+    }
+
+    function drawSettingsScreen() {
+      drawSky();
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 36px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText('SETTINGS', CONFIG.width / 2, 120);
+
+      const fields = [
+        { label: 'Gravity', value: state.settingsValues[0] },
+        { label: 'Points to Win', value: state.settingsValues[1] },
+        { label: '[ START GAME ]', value: '' },
+      ];
+
+      for (let i = 0; i < fields.length; i++) {
+        const yPos = 220 + i * 60;
+        const isSelected = state.settingsField === i;
+
+        ctx.fillStyle = isSelected ? '#FFFF55' : '#AAAAAA';
+        ctx.font = '20px Courier New';
+        ctx.textAlign = 'center';
+
+        if (i < 2) {
+          ctx.fillText(`${fields[i].label}: ${fields[i].value}`, CONFIG.width / 2, yPos);
+          if (isSelected) {
+            // Cursor
+            if (Math.sin(state.cursorBlink * 5) > 0) {
+              const textW = `${fields[i].label}: ${fields[i].value}`.length * 12;
+              ctx.fillRect(CONFIG.width / 2 + textW / 2 + 4, yPos - 16, 10, 20);
+            }
+          }
+        } else {
+          ctx.fillStyle = isSelected ? '#55FF55' : '#AAAAAA';
+          ctx.fillText(fields[i].label, CONFIG.width / 2, yPos);
+        }
+      }
+
+      ctx.fillStyle = '#888888';
+      ctx.font = '14px Courier New';
+      ctx.fillText('Up/Down = select   Enter = confirm   Esc = back', CONFIG.width / 2, 450);
+      state.cursorBlink += 0.05;
+    }
+
+    function drawRoundOverScreen() {
+      // Darken
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+      ctx.fillStyle = '#FFFF55';
+      ctx.font = 'bold 28px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${state.players[state.currentPlayer].name} scores!`, CONFIG.width / 2, CONFIG.height / 2 - 30);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '20px Courier New';
+      ctx.fillText(
+        `Score: ${state.scores[0]} - ${state.scores[1]}`,
+        CONFIG.width / 2,
+        CONFIG.height / 2 + 10
+      );
+
+      if (state.roundMessageTimer <= 0) {
+        ctx.fillStyle = '#AAAAAA';
+        ctx.font = '16px Courier New';
+        ctx.fillText('Press ENTER for next round', CONFIG.width / 2, CONFIG.height / 2 + 50);
+      }
+    }
+
+    function drawGameOverScreen() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+      const winner = state.scores[0] >= state.pointsToWin ? 0 : 1;
+
+      ctx.fillStyle = '#FFFF00';
+      ctx.font = 'bold 36px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${state.players[winner].name} WINS!`, CONFIG.width / 2, CONFIG.height / 2 - 40);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '24px Courier New';
+      ctx.fillText(
+        `Final Score: ${state.scores[0]} - ${state.scores[1]}`,
+        CONFIG.width / 2,
+        CONFIG.height / 2 + 10
+      );
+
+      ctx.fillStyle = '#AAAAAA';
+      ctx.font = '16px Courier New';
+      ctx.fillText('Press ENTER to play again', CONFIG.width / 2, CONFIG.height / 2 + 60);
+    }
+
+    // ========================================================================
+    // 7. INPUT HANDLING
+    // ========================================================================
+    document.addEventListener('keydown', handleKeyDown);
+
+    function handleKeyDown(e) {
+      switch (state.phase) {
+        case GAME_STATES.TITLE:
+          handleTitleInput(e);
+          break;
+        case GAME_STATES.SETTINGS:
+          handleSettingsInput(e);
+          break;
+        case GAME_STATES.INPUT:
+          handleGameInput(e);
+          break;
+        case GAME_STATES.ROUND_OVER:
+          if (e.key === 'Enter' && state.roundMessageTimer <= 0) {
+            if (state.scores[0] >= state.pointsToWin || state.scores[1] >= state.pointsToWin) {
+              state.phase = GAME_STATES.GAME_OVER;
+            } else {
+              startNewRound();
+            }
+          }
+          break;
+        case GAME_STATES.GAME_OVER:
+          if (e.key === 'Enter') {
+            resetGame();
+          }
+          break;
+      }
+    }
+
+    function handleTitleInput(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        startNewGame();
+      } else if (e.key === 's' || e.key === 'S') {
+        state.phase = GAME_STATES.SETTINGS;
+        state.settingsField = 0;
+        state.settingsValues = [String(state.gravity), String(state.pointsToWin)];
+      }
+    }
+
+    function handleSettingsInput(e) {
+      if (e.key === 'ArrowUp') {
+        state.settingsField = (state.settingsField - 1 + 3) % 3;
+      } else if (e.key === 'ArrowDown' || e.key === 'Tab') {
+        e.preventDefault();
+        state.settingsField = (state.settingsField + 1) % 3;
+      } else if (e.key === 'Escape') {
+        state.phase = GAME_STATES.TITLE;
+      } else if (e.key === 'Enter') {
+        if (state.settingsField === 2) {
+          // Apply settings and start
+          const g = parseFloat(state.settingsValues[0]);
+          const p = parseInt(state.settingsValues[1]);
+          if (!isNaN(g) && g > 0) state.gravity = g;
+          if (!isNaN(p) && p > 0) state.pointsToWin = p;
+          startNewGame();
+        }
+      } else if (e.key === 'Backspace') {
+        if (state.settingsField < 2) {
+          state.settingsValues[state.settingsField] = state.settingsValues[state.settingsField].slice(0, -1);
+        }
+      } else if (e.key.length === 1 && state.settingsField < 2) {
+        if ('0123456789.'.includes(e.key)) {
+          state.settingsValues[state.settingsField] += e.key;
+        }
+      }
+    }
+
+    function handleGameInput(e) {
+      const p = state.players[state.currentPlayer];
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        // Save current input
+        applyInput();
+        // Switch field
+        state.inputField = state.inputField === 'angle' ? 'velocity' : 'angle';
+        state.inputText = state.inputField === 'angle' ? String(p.angle) : String(p.velocity);
+      } else if (e.key === 'Enter') {
+        applyInput();
+        // Launch!
+        state.phase = GAME_STATES.THROWING;
+        state.throwTimer = 0.3;
+      } else if (e.key === 'Backspace') {
+        state.inputText = state.inputText.slice(0, -1);
+      } else if (e.key.length === 1 && '0123456789.-'.includes(e.key)) {
+        if (state.inputText.length < 6) {
+          state.inputText += e.key;
+        }
+      }
+    }
+
+    function applyInput() {
+      const p = state.players[state.currentPlayer];
+      const val = parseFloat(state.inputText);
+      if (!isNaN(val)) {
+        if (state.inputField === 'angle') {
+          p.angle = clamp(val, 0, 360);
+        } else {
+          p.velocity = clamp(val, 0, 200);
+        }
+      }
+      state.inputText = '';
+    }
+
+    // ========================================================================
+    // 8. GAME LOOP & STATE MANAGEMENT
+    // ========================================================================
+    let lastTime = 0;
+
+    function startNewGame() {
+      state.scores = [0, 0];
+      startNewRound();
+    }
+
+    function startNewRound() {
+      state.buildings = generateCity();
+      renderTerrainToCanvas();
+      placeGorillas(state.buildings);
+      state.wind = rand(CONFIG.windMin, CONFIG.windMax);
+      state.wind = Math.round(state.wind * 10) / 10;
+      state.banana = null;
+      state.explosion = null;
+      state.sun.surprised = false;
+      state.phase = GAME_STATES.ROUND_START;
+      state.roundMessageTimer = 1.5;
+      state.inputField = 'angle';
+      state.inputText = '';
+      // Reset player angles to reasonable defaults
+      state.players[0].angle = 60;
+      state.players[0].velocity = 50;
+      state.players[1].angle = 60;
+      state.players[1].velocity = 50;
+    }
+
+    function resetGame() {
+      state.phase = GAME_STATES.TITLE;
+      state.scores = [0, 0];
+    }
+
+    function update(dt) {
+      // Sun surprise timer
+      if (state.sun.surprised) {
+        state.sun.surprisedTimer -= dt;
+        if (state.sun.surprisedTimer <= 0) {
+          state.sun.surprised = false;
+        }
+      }
+
+      switch (state.phase) {
+        case GAME_STATES.ROUND_START:
+          state.roundMessageTimer -= dt;
+          if (state.roundMessageTimer <= 0) {
+            state.phase = GAME_STATES.INPUT;
+            state.currentPlayer = randInt(0, 1);
+            state.inputText = '';
+          }
+          break;
+
+        case GAME_STATES.THROWING:
+          state.throwTimer -= dt;
+          if (state.throwTimer <= 0) {
+            launchBanana();
+            state.phase = GAME_STATES.FLYING;
+          }
+          break;
+
+        case GAME_STATES.FLYING:
+          updateBanana(dt);
+          break;
+
+        case GAME_STATES.EXPLODING:
+        case GAME_STATES.HIT:
+          updateExplosion(dt);
+          break;
+
+        case GAME_STATES.ROUND_OVER:
+          state.roundMessageTimer -= dt;
+          break;
+      }
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, CONFIG.width, CONFIG.height);
+
+      switch (state.phase) {
+        case GAME_STATES.TITLE:
+          drawTitleScreen();
+          return;
+        case GAME_STATES.SETTINGS:
+          drawSettingsScreen();
+          return;
+        case GAME_STATES.GAME_OVER:
+          drawSky();
+          drawSun();
+          drawTerrain();
+          drawGorilla(0);
+          drawGorilla(1);
+          drawHUD();
+          drawGameOverScreen();
+          return;
+      }
+
+      // In-game rendering
+      drawSky();
+      drawSun();
+      drawTerrain();
+
+      // Draw gorillas (skip the one that was hit in HIT/ROUND_OVER phases)
+      for (let i = 0; i < 2; i++) {
+        if (
+          (state.phase === GAME_STATES.HIT || state.phase === GAME_STATES.ROUND_OVER) &&
+          i !== state.currentPlayer // the non-current player was hit
+        ) {
+          continue; // Don't draw the hit gorilla
+        }
+        drawGorilla(i);
+      }
+
+      drawBanana();
+      drawExplosion();
+      drawHUD();
+      drawInputUI();
+
+      // Round start overlay
+      if (state.phase === GAME_STATES.ROUND_START) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+        ctx.fillStyle = '#FFFF55';
+        ctx.font = 'bold 30px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText('ROUND START!', CONFIG.width / 2, CONFIG.height / 2);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '18px Courier New';
+        ctx.fillText(
+          `Score: ${state.scores[0]} - ${state.scores[1]}  |  First to ${state.pointsToWin}`,
+          CONFIG.width / 2,
+          CONFIG.height / 2 + 35
+        );
+      }
+
+      // Round over overlay
+      if (state.phase === GAME_STATES.ROUND_OVER) {
+        drawRoundOverScreen();
+      }
+    }
+
+    function gameLoop(timestamp) {
+      const dt = Math.min((timestamp - lastTime) / 1000, 0.05); // Cap delta time
+      lastTime = timestamp;
+
+      update(dt);
+      render();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    // ========================================================================
+    // 9. INITIALIZATION
+    // ========================================================================
+    function init() {
+      // Scale canvas to fit window while maintaining aspect ratio
+      function resize() {
+        const scaleX = window.innerWidth / CONFIG.width;
+        const scaleY = window.innerHeight / CONFIG.height;
+        const scale = Math.min(scaleX, scaleY);
+        canvas.style.width = `${CONFIG.width * scale}px`;
+        canvas.style.height = `${CONFIG.height * scale}px`;
+      }
+      window.addEventListener('resize', resize);
+      resize();
+
+      state.phase = GAME_STATES.TITLE;
+      requestAnimationFrame(gameLoop);
+    }
+
+    init();
+  </script>
+</body>
+</html>
